@@ -1,6 +1,3 @@
-# ====================================
-# 🔧 ライブラリと初期設定の読み込み
-# ====================================
 import os
 import re
 import uuid
@@ -13,78 +10,81 @@ from pydantic import BaseModel
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from dotenv import load_dotenv
 
-# 環境変数読み込み
+# -------------------------------
+# 🌍 環境変数読み込み
+# -------------------------------
 load_dotenv()
 
-# ====================================
-# 🚀 FastAPI アプリケーション作成
-# ====================================
 app = FastAPI()
 
-# ====================================
+# -------------------------------
 # 🌐 CORS 設定
-# ====================================
-origins = [
-    "*",  # 一旦全許可（フロント確認用）
-]
+# -------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # フロント確認用に全許可（必要なら制限可）
     allow_methods=["*"],
     allow_headers=["*"]
 )
 
-# ====================================
+# -------------------------------
 # 🔐 Azure Blob Storage 接続
-# ====================================
+# -------------------------------
 azure_connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 if not azure_connection_string:
     raise ValueError("❌ AZURE_STORAGE_CONNECTION_STRING が設定されていません")
 
 blob_service_client = BlobServiceClient.from_connection_string(azure_connection_string)
+
+# ✅ 正しいコンテナー名を使用
 container_name = "instagram"
 
 print("✅ Azure Blob Storage 接続成功:", blob_service_client.account_name)
 
-# ====================================
-# 📦 リクエストモデル定義
-# ====================================
+
+# -------------------------------
+# 📦 リクエストモデル
+# -------------------------------
 class PostURL(BaseModel):
     url: str
 
-# ====================================
-# 🧪 動作確認用エンドポイント
-# ====================================
+
+# -------------------------------
+# 🧪 動作確認用
+# -------------------------------
 @app.get("/api/hello")
 async def hello_world():
     return JSONResponse(content={"message": "Hello World"})
 
 
-# ====================================
-# 🖼 Instagram投稿データ取得＆アップロード
-# ====================================
+# -------------------------------
+# 🖼 Instagram投稿データ取得＆Blobアップロード
+# -------------------------------
 @app.post("/api/fetch-instagram-post")
 async def fetch_instagram_post(post: PostURL):
     try:
-        # Instagram URL から shortcode を抽出
+        # ✅ Instagram URLから shortcode 抽出
         shortcode_match = re.search(r"/p/([^/?#&]+)", post.url)
         if not shortcode_match:
             return JSONResponse(status_code=400, content={"error": "URLが正しくありません"})
 
         shortcode = shortcode_match.group(1)
 
-        # Instaloaderで投稿情報取得
+        # ✅ Instaloaderで投稿情報取得
         loader = instaloader.Instaloader()
         post_data = instaloader.Post.from_shortcode(loader.context, shortcode)
 
-        # 画像URL取得
+        # ✅ 画像URL取得
         image_url = post_data.url
 
-        # 画像を取得（バイナリ）
-        img_data = requests.get(image_url).content
+        # ✅ 画像を取得（バイナリ）
+        response = requests.get(image_url)
+        response.raise_for_status()
+        img_data = response.content
+
         filename = f"{shortcode}_{uuid.uuid4().hex}.jpg"
 
-        # Azure Storage へアップロード
+        # ✅ Azure Blob Storageへアップロード
         blob_client = blob_service_client.get_blob_client(container=container_name, blob=filename)
         blob_client.upload_blob(
             img_data,
@@ -93,10 +93,9 @@ async def fetch_instagram_post(post: PostURL):
             content_settings=ContentSettings(content_type="image/jpeg")
         )
 
-        # Azure上の公開URL
+        # ✅ アップロード後の公開URL
         uploaded_image_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{container_name}/{filename}"
 
-        # 投稿情報とアップロードした画像URLを返す
         result = {
             "image_url": uploaded_image_url,
             "caption": post_data.caption,
@@ -106,13 +105,19 @@ async def fetch_instagram_post(post: PostURL):
         return result
 
     except Exception as e:
-        print("❌ エラー:", str(e))
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        import traceback
+        error_details = traceback.format_exc()
+        print("❌ エラー詳細:\n", error_details)
+        # 👇 Azure ログにも出す
+        return JSONResponse(status_code=500, content={
+            "error": str(e),
+            "trace": error_details
+        })
 
 
-# ====================================
-# ▶️ ローカル実行（開発用）
-# ====================================
+# -------------------------------
+# ▶️ ローカル実行用
+# -------------------------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
