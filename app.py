@@ -42,7 +42,7 @@ if not azure_connection_string:
     raise ValueError("❌ AZURE_STORAGE_CONNECTION_STRING が設定されていません")
 
 blob_service_client = BlobServiceClient.from_connection_string(azure_connection_string)
-container_name = "instagram-posts"
+container_name = "instagram"
 
 print("✅ Azure Blob Storage 接続成功:", blob_service_client.account_name)
 
