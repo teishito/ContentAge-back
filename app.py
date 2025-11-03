@@ -2,7 +2,6 @@ import os
 import re
 import uuid
 import requests
-import instaloader
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,9 +35,8 @@ if not azure_connection_string:
 
 blob_service_client = BlobServiceClient.from_connection_string(azure_connection_string)
 
-# ✅ 正しいコンテナー名を使用
+# ✅ コンテナー名
 container_name = "instagram"
-
 print("✅ Azure Blob Storage 接続成功:", blob_service_client.account_name)
 
 
@@ -58,7 +56,7 @@ async def hello_world():
 
 
 # -------------------------------
-# 🖼 Instagram投稿データ取得＆Blobアップロード
+# 📸 Instagram投稿データ取得＆Blobアップロード
 # -------------------------------
 @app.post("/api/fetch-instagram-post")
 async def fetch_instagram_post(post: PostURL):
@@ -67,21 +65,27 @@ async def fetch_instagram_post(post: PostURL):
         shortcode_match = re.search(r"/p/([^/?#&]+)", post.url)
         if not shortcode_match:
             return JSONResponse(status_code=400, content={"error": "URLが正しくありません"})
-
         shortcode = shortcode_match.group(1)
 
-        # ✅ Instaloaderで投稿情報取得
-        loader = instaloader.Instaloader()
-        post_data = instaloader.Post.from_shortcode(loader.context, shortcode)
+        # ✅ 公開APIを利用して投稿情報取得（非ログイン対応）
+        api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(api_url, headers=headers)
+        res.raise_for_status()
+        data = res.json()
 
-        # ✅ 画像URL取得
-        image_url = post_data.url
+        # ✅ JSON構造から画像URLや本文などを取得
+        media = data.get("graphql", {}).get("shortcode_media", {})
+        image_url = media.get("display_url")
+        caption = media.get("edge_media_to_caption", {}).get("edges", [{}])[0].get("node", {}).get("text", "")
+        likes = media.get("edge_media_preview_like", {}).get("count", 0)
+        comments = media.get("edge_media_to_parent_comment", {}).get("count", 0)
 
-        # ✅ 画像を取得（バイナリ）
-        response = requests.get(image_url)
-        response.raise_for_status()
-        img_data = response.content
+        if not image_url:
+            raise Exception("Instagramデータが取得できませんでした")
 
+        # ✅ 画像をダウンロード
+        img_data = requests.get(image_url, headers=headers).content
         filename = f"{shortcode}_{uuid.uuid4().hex}.jpg"
 
         # ✅ Azure Blob Storageへアップロード
@@ -98,9 +102,9 @@ async def fetch_instagram_post(post: PostURL):
 
         result = {
             "image_url": uploaded_image_url,
-            "caption": post_data.caption,
-            "likes": post_data.likes,
-            "comments": post_data.comments,
+            "caption": caption,
+            "likes": likes,
+            "comments": comments,
         }
         return result
 
@@ -108,7 +112,6 @@ async def fetch_instagram_post(post: PostURL):
         import traceback
         error_details = traceback.format_exc()
         print("❌ エラー詳細:\n", error_details)
-        # 👇 Azure ログにも出す
         return JSONResponse(status_code=500, content={
             "error": str(e),
             "trace": error_details
