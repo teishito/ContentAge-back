@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 import requests
+import instaloader
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -21,7 +22,7 @@ app = FastAPI()
 # -------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # フロント確認用に全許可（必要なら制限可）
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"]
 )
@@ -34,18 +35,14 @@ if not azure_connection_string:
     raise ValueError("❌ AZURE_STORAGE_CONNECTION_STRING が設定されていません")
 
 blob_service_client = BlobServiceClient.from_connection_string(azure_connection_string)
-
-# ✅ コンテナー名
 container_name = "instagram"
 print("✅ Azure Blob Storage 接続成功:", blob_service_client.account_name)
-
 
 # -------------------------------
 # 📦 リクエストモデル
 # -------------------------------
 class PostURL(BaseModel):
     url: str
-
 
 # -------------------------------
 # 🧪 動作確認用
@@ -54,9 +51,8 @@ class PostURL(BaseModel):
 async def hello_world():
     return JSONResponse(content={"message": "Hello World"})
 
-
 # -------------------------------
-# 📸 Instagram投稿データ取得＆Blobアップロード
+# 🖼 Instagram投稿データ取得＆Blobアップロード
 # -------------------------------
 @app.post("/api/fetch-instagram-post")
 async def fetch_instagram_post(post: PostURL):
@@ -65,46 +61,59 @@ async def fetch_instagram_post(post: PostURL):
         shortcode_match = re.search(r"/p/([^/?#&]+)", post.url)
         if not shortcode_match:
             return JSONResponse(status_code=400, content={"error": "URLが正しくありません"})
+
         shortcode = shortcode_match.group(1)
 
-        # ✅ 公開APIを利用して投稿情報取得（非ログイン対応）
-        api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(api_url, headers=headers)
-        res.raise_for_status()
-        data = res.json()
+        # ✅ Instaloaderの初期化とログイン処理
+        loader = instaloader.Instaloader()
+        username = os.getenv("INSTAGRAM_USERNAME")
+        password = os.getenv("INSTAGRAM_PASSWORD")
 
-        # ✅ JSON構造から画像URLや本文などを取得
-        media = data.get("graphql", {}).get("shortcode_media", {})
-        image_url = media.get("display_url")
-        caption = media.get("edge_media_to_caption", {}).get("edges", [{}])[0].get("node", {}).get("text", "")
-        likes = media.get("edge_media_preview_like", {}).get("count", 0)
-        comments = media.get("edge_media_to_parent_comment", {}).get("count", 0)
+        if username and password:
+            try:
+                loader.login(username, password)
+                print(f"✅ Instagram ログイン成功: {username}")
+            except Exception as e:
+                print(f"⚠️ Instagramログイン失敗: {e}")
+        else:
+            print("⚠️ 未ログイン状態で実行しています。非公開アカウントは取得できません。")
 
-        if not image_url:
-            raise Exception("Instagramデータが取得できませんでした")
+        # ✅ 投稿情報取得
+        post_data = instaloader.Post.from_shortcode(loader.context, shortcode)
 
-        # ✅ 画像をダウンロード
-        img_data = requests.get(image_url, headers=headers).content
-        filename = f"{shortcode}_{uuid.uuid4().hex}.jpg"
+        # ✅ 画像 or 動画を判定
+        is_video = post_data.is_video
+        ext = "mp4" if is_video else "jpg"
+        content_type = "video/mp4" if is_video else "image/jpeg"
+
+        # ✅ メディアURL取得
+        media_url = post_data.video_url if is_video else post_data.url
+
+        # ✅ バイナリデータ取得
+        response = requests.get(media_url)
+        response.raise_for_status()
+        media_data = response.content
+
+        filename = f"{shortcode}_{uuid.uuid4().hex}.{ext}"
 
         # ✅ Azure Blob Storageへアップロード
         blob_client = blob_service_client.get_blob_client(container=container_name, blob=filename)
         blob_client.upload_blob(
-            img_data,
+            media_data,
             overwrite=True,
             blob_type="BlockBlob",
-            content_settings=ContentSettings(content_type="image/jpeg")
+            content_settings=ContentSettings(content_type=content_type)
         )
 
-        # ✅ アップロード後の公開URL
-        uploaded_image_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{container_name}/{filename}"
+        # ✅ 公開URL生成
+        uploaded_media_url = f"https://{blob_service_client.account_name}.blob.core.windows.net/{container_name}/{filename}"
 
         result = {
-            "image_url": uploaded_image_url,
-            "caption": caption,
-            "likes": likes,
-            "comments": comments,
+            "media_url": uploaded_media_url,
+            "caption": post_data.caption,
+            "likes": post_data.likes,
+            "comments": post_data.comments,
+            "is_video": is_video
         }
         return result
 
